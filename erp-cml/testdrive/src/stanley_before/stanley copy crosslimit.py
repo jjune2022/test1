@@ -4,7 +4,7 @@ import rospy
 import numpy as np
 import tf2_ros
 import matplotlib.pyplot as plt
-from math import cos, sin, tan
+from math import cos, sin
 from geometry_msgs.msg import Twist, Point
 from nav_msgs.msg import Odometry, Path
 from visualization_msgs.msg import Marker
@@ -30,11 +30,8 @@ odom_x_for_cross_track_error = []
 path_x_data = []
 path_y_data = []
 
-stanley_k = []
-stanley_vel = []
-
 class Stanleycontroller:
-    def __init__(self, hz=50, k=1.0):
+    def __init__(self, hz=50, k=1):
         rospy.init_node('Stanleycontroller')
         rospy.Subscriber("/odom", Odometry, self.odom_update)
         rospy.Subscriber('/way_points', Path, self.waypoints_callback)
@@ -51,12 +48,10 @@ class Stanleycontroller:
         self.k = k            # Stanley controller gain for angle correction
         self.min_vel = 0.0
         self.marker_id = 0
-        self.max_vel = 2
+        self.max_vel = 5
         self.angles = np.linspace(0, np.pi, 100)
         self.waypoints = []
-        self.velocity = 0.1 # m/s
-        stanley_k.append(self.k)
-        stanley_vel.append(self.velocity)
+        self.velocity = 1  # m/s
 
     # odom은 bringup으로부터 자동으로 publish됨(global좌표)
     def odom_update(self, data):
@@ -64,7 +59,7 @@ class Stanleycontroller:
         self.odom_twist = data.twist.twist
         self.theta0 = self.get_yaw_from_quaternion(self.odom_pose.orientation)
         # front wheel center
-        self.x0, self.y0 = self.odom_pose.position.x + 0.232 * cos(self.theta0), self.odom_pose.position.y + 0.232 * sin(self.theta0) # 0.232 m
+        self.x0, self.y0 = self.odom_pose.position.x + 0.175 * cos(self.theta0), self.odom_pose.position.y + 0.175 * sin(self.theta0)
 
         # x_data, y_data에 현재 위치 추가
         x_data.append(self.x0)
@@ -79,7 +74,6 @@ class Stanleycontroller:
                 path_x_data.append(x)
                 path_y_data.append(y)
         self.run_stanley()
-
 
     def run_stanley(self):
         if len(self.waypoints) < 2 or self.odom_pose is None:
@@ -96,26 +90,25 @@ class Stanleycontroller:
             if dist < min_dist:
                 min_dist = dist
                 closest_idx = i
+
         # Waypoint to track is the closest one or next waypoint
         target_wp = self.waypoints[closest_idx]
 
         # Compute the heading error
-        path_angle = np.arctan2(self.waypoints[closest_idx+1][1] - self.waypoints[closest_idx][1],
-                                 self.waypoints[closest_idx+1][0] - self.waypoints[closest_idx][0])  # rad
-        heading_error =path_angle - self.theta0
+        path_angle = np.arctan2(target_wp[1] - self.y0, target_wp[0] - self.x0)  # rad
+        cross_track_error = np.sqrt((target_wp[0] - self.x0) ** 2 + (target_wp[1] - self.y0) ** 2)
+        heading_error = path_angle - self.theta0
+
         #Normalize heading error to [-pi, pi]
         heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
 
-        # the car's tangent line below: cross_track negative / above: positive
-        if tan(heading_error) * target_wp[0] + (self.y0 - tan(heading_error) * self.x0) > target_wp[1]:
-            cross_track_error = - np.sqrt((target_wp[0] - self.x0) ** 2 + (target_wp[1] - self.y0) ** 2)
-        else :
-            cross_track_error = np.sqrt((target_wp[0] - self.x0) ** 2 + (target_wp[1] - self.y0) ** 2)
-
         # Stanley control
         angle_correction = heading_error + np.arctan2(self.k * cross_track_error, v0)
-        omega = angle_correction / self.dt  # /ref_pos 50초마다 publish
+        omega = angle_correction / self.dt  # /ref_pos 50초마다 publish한다고 가정
         omega = np.clip(omega, -2.5235, 2.5235)  # Limit angular velocity
+
+        if cross_track_error < 0.04:
+            omega = 0
 
         # Publish control command
         control_cmd = Twist()
@@ -123,6 +116,7 @@ class Stanleycontroller:
         control_cmd.angular.z = omega
         self.pub.publish(control_cmd)
 
+        # Debug info
         rospy.loginfo(f"Velocity: {velocity}, Angular Velocity: {omega}, Heading Error: {heading_error}, Path Distance: {cross_track_error}, Target: {target_wp}")
 
         # heading error와 path distance를 리스트에 추가
@@ -133,13 +127,10 @@ class Stanleycontroller:
         odom_x_for_heading_error.append(self.x0)
         odom_x_for_cross_track_error.append(self.x0)
 
-
         # 종료 조건: odom의 x 값이 path의 x 값에 도달한 경우
-        # 작은 오차를 허용
-        if abs(self.x0 - path_x_data[-1]) < 0.5 and abs(self.y0 - path_y_data[-1]) < 0.5:
+        if abs(self.x0 - path_x_data[-1]) < 0.01:  # 작은 오차를 허용
             rospy.loginfo("Reached the target x position. Shutting down the node.")
             save_results_and_shutdown()
-
 
     def get_yaw_from_quaternion(self, q):
         """
@@ -150,13 +141,13 @@ class Stanleycontroller:
 
 def save_graph():
     # 디렉터리가 없으면 생성
-    save_dir = os.path.expanduser(f'~/scout_sim/odom/v{stanley_vel}_tuning')
+    save_dir = os.path.expanduser('~/scout_sim/odom')
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     # 고유 파일 이름 생성
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'graph_v{stanley_vel}_{stanley_k}.png'
+    filename = f'combined_graph_{timestamp}.png'
     filepath = os.path.join(save_dir, filename)
 
     fig, axs = plt.subplots(3, 1, figsize=(10, 15))  # 3개의 서브플롯을 세로로 배치
@@ -203,7 +194,7 @@ def save_rmse_table(cross_track_rmse, heading_rmse):
     df = pd.DataFrame(data)
 
     # 디렉터리가 없으면 생성
-    save_dir = os.path.expanduser(f'~/scout_sim/table/v{stanley_vel}_tuning')
+    save_dir = os.path.expanduser('~/scout_sim/table')
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -211,7 +202,7 @@ def save_rmse_table(cross_track_rmse, heading_rmse):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
 
     # 이미지 파일 이름 생성
-    img_filename = f'rmse_v{stanley_vel}_{stanley_k}.png'
+    img_filename = f'rmse_table_{timestamp}.png'
     img_filepath = os.path.join(save_dir, img_filename)
 
     # 표를 이미지로 저장
@@ -224,40 +215,20 @@ def save_rmse_table(cross_track_rmse, heading_rmse):
 
     print(f"RMSE table saved as {img_filepath}")
 
-def save_data_to_txt():
-    save_dir = os.path.expanduser(f'~/scout_sim/odom/stanley_v{stanley_vel}_tuning')
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    # x, y 데이터 저장
-    np.savetxt(os.path.join(save_dir, 'stanley_xy_data.txt'), np.column_stack((x_data, y_data)), header="x y", comments='')
-
-    # heading error, cross track error 데이터 저장
-    np.savetxt(os.path.join(save_dir, 'stanley_errors.txt'), np.column_stack((odom_x_for_heading_error, heading_error_data, cross_track_error_data)), header="x heading_error cross_track_error", comments='')
-
-    print(f"Data saved as text files in {save_dir}")
-
-# save_results_and_shutdown 함수 내에서 텍스트 데이터 저장 호출
 def save_results_and_shutdown():
     # 그래프 저장
     save_graph()
 
-    # 텍스트 데이터 저장
-    save_data_to_txt()
-
     # RMSE 계산
-    cross_track_rmse = round(calculate_rmse(cross_track_error_data), 3)
-    heading_rmse = round(calculate_rmse(heading_error_data), 3)
+    cross_track_rmse = round(calculate_rmse(cross_track_error_data),3)
+    heading_rmse = round(calculate_rmse(heading_error_data),3)
+
     # RMSE 표 저장
     save_rmse_table(cross_track_rmse, heading_rmse)
-    # RMSE print
-    print()
-    print()
-    print(f'v{stanley_vel},k{stanley_k} | cross_track: {cross_track_rmse}, heading: {heading_rmse}')
-    print()
-    print()
+
     # ROS 노드 종료
     rospy.signal_shutdown("Results saved, shutting down.")
+
 def signal_handler(sig, frame):
     save_results_and_shutdown()
 

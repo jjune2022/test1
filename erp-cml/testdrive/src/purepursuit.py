@@ -4,7 +4,7 @@ import rospy
 import numpy as np
 import tf2_ros
 import matplotlib.pyplot as plt
-from math import cos, sin, tan
+from math import cos, sin, atan2, sqrt
 from geometry_msgs.msg import Twist, Point
 from nav_msgs.msg import Odometry, Path
 from visualization_msgs.msg import Marker
@@ -30,43 +30,37 @@ odom_x_for_cross_track_error = []
 path_x_data = []
 path_y_data = []
 
-stanley_k = []
-stanley_vel = []
+pure_pursuit_ld_gain = []
+pure_pursuit_vel = []
 
-class Stanleycontroller:
-    def __init__(self, hz=50, k=1.0):
-        rospy.init_node('Stanleycontroller')
+class PurePursuitController:
+    def __init__(self, hz=50, ld_gain=1.0, ld_min = 0.6, car_wheel_base=0.463):
+        rospy.init_node('PurePursuitController')
         rospy.Subscriber("/odom", Odometry, self.odom_update)
         rospy.Subscriber('/way_points', Path, self.waypoints_callback)
         self.pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
-        self.local_points = []
-        self.global_points = None
+        self.marker_pub = rospy.Publisher('/lookahsead_marker', Marker, queue_size=10)
         self.hz = hz
         self.dt = 1 / hz  # time step
-        self.odom_pose = None  # position x, y, z, orientation x, y, z, w
-        self.odom_twist = None  # linear x, y, z, angular x, y, z
+        self.odom_pose = None
+        self.odom_twist = None
         self.x0 = 0.0
         self.y0 = 0.0
+        self.ld_min =ld_min
         self.theta0 = 0.0
-        self.k = k            # Stanley controller gain for angle correction
-        self.min_vel = 0.0
-        self.marker_id = 0
-        self.max_vel = 2
-        self.angles = np.linspace(0, np.pi, 100)
+        self.ld_gain = ld_gain   # Lookahead distance gain
+        self.car_wheel_base = car_wheel_base
+        self.velocity = 0.5   # m/s
+        pure_pursuit_ld_gain.append(self.ld_gain)
+        pure_pursuit_vel.append(self.velocity)
         self.waypoints = []
-        self.velocity = 0.1 # m/s
-        stanley_k.append(self.k)
-        stanley_vel.append(self.velocity)
 
-    # odom은 bringup으로부터 자동으로 publish됨(global좌표)
     def odom_update(self, data):
         self.odom_pose = data.pose.pose
         self.odom_twist = data.twist.twist
         self.theta0 = self.get_yaw_from_quaternion(self.odom_pose.orientation)
-        # front wheel center
-        self.x0, self.y0 = self.odom_pose.position.x + 0.232 * cos(self.theta0), self.odom_pose.position.y + 0.232 * sin(self.theta0) # 0.232 m
+        self.x0, self.y0 = self.odom_pose.position.x, self.odom_pose.position.y
 
-        # x_data, y_data에 현재 위치 추가
         x_data.append(self.x0)
         y_data.append(self.y0)
 
@@ -78,85 +72,112 @@ class Stanleycontroller:
                 self.waypoints.append((x, y))
                 path_x_data.append(x)
                 path_y_data.append(y)
-        self.run_stanley()
+        self.run_pure_pursuit()
 
-
-    def run_stanley(self):
+    def run_pure_pursuit(self):
         if len(self.waypoints) < 2 or self.odom_pose is None:
             return
 
         v0 = self.velocity
-        velocity = self.velocity
-
-        # Find the closest waypoint
-        min_dist = float('inf')
+        ld = self.ld_gain * self.velocity+self.ld_min  # Lookahead distance
         closest_idx = 0
-        for i, (wx, wy) in enumerate(self.waypoints):
-            dist = np.sqrt((self.x0 - wx) ** 2 + (self.y0 - wy) ** 2)
+        min_dist = float('inf')
+
+        # Find the closest waypoint ahead of the robot
+        for i in range(len(self.waypoints)):
+            dist = sqrt((self.x0 - self.waypoints[i][0]) ** 2 + (self.y0 - self.waypoints[i][1]) ** 2)
             if dist < min_dist:
                 min_dist = dist
                 closest_idx = i
-        # Waypoint to track is the closest one or next waypoint
-        target_wp = self.waypoints[closest_idx]
 
+        cross_track_error_data.append(min_dist)
         # Compute the heading error
         path_angle = np.arctan2(self.waypoints[closest_idx+1][1] - self.waypoints[closest_idx][1],
                                  self.waypoints[closest_idx+1][0] - self.waypoints[closest_idx][0])  # rad
         heading_error =path_angle - self.theta0
         #Normalize heading error to [-pi, pi]
         heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
-
-        # the car's tangent line below: cross_track negative / above: positive
-        if tan(heading_error) * target_wp[0] + (self.y0 - tan(heading_error) * self.x0) > target_wp[1]:
-            cross_track_error = - np.sqrt((target_wp[0] - self.x0) ** 2 + (target_wp[1] - self.y0) ** 2)
-        else :
-            cross_track_error = np.sqrt((target_wp[0] - self.x0) ** 2 + (target_wp[1] - self.y0) ** 2)
-
-        # Stanley control
-        angle_correction = heading_error + np.arctan2(self.k * cross_track_error, v0)
-        omega = angle_correction / self.dt  # /ref_pos 50초마다 publish
-        omega = np.clip(omega, -2.5235, 2.5235)  # Limit angular velocity
-
-        # Publish control command
-        control_cmd = Twist()
-        control_cmd.linear.x = velocity
-        control_cmd.angular.z = omega
-        self.pub.publish(control_cmd)
-
-        rospy.loginfo(f"Velocity: {velocity}, Angular Velocity: {omega}, Heading Error: {heading_error}, Path Distance: {cross_track_error}, Target: {target_wp}")
-
-        # heading error와 path distance를 리스트에 추가
         heading_error_data.append(heading_error)
-        cross_track_error_data.append(cross_track_error)
-
-        # 추가: heading error와 path distance의 x축 값을 odom.pose.x 값으로 저장
         odom_x_for_heading_error.append(self.x0)
         odom_x_for_cross_track_error.append(self.x0)
 
 
+        # Find the lookahead point
+        # Find the closest waypoint ahead of the robot
+        for i in range(len(self.waypoints)):
+            dist = sqrt((self.x0 - 0.232 * cos(self.theta0)- self.waypoints[i][0]) ** 2 + (self.y0 - 0.232 * sin(self.theta0)- self.waypoints[i][1]) ** 2)
+            if dist < min_dist:
+                min_dist = dist
+                closest_idx = i
+        lookahead_point = None
+        for i in range(closest_idx, len(self.waypoints)):
+            dist = sqrt((((self.x0 - 0.232 * cos(self.theta0) )) - self.waypoints[i][0]) ** 2 + (((self.y0- 0.232 * sin(self.theta0))) - self.waypoints[i][1]) ** 2)
+            if abs(dist -ld) < 0.1 and self.x0 < self.waypoints[i][0]:
+                lookahead_point = self.waypoints[i]
+                break
+
+        if lookahead_point is None:
+            lookahead_point = self.waypoints[-1]  # Fallback to the last point
+
+        # Publish the lookahead point as a Marker
+        self.publish_lookahead_marker(lookahead_point)
+
+        # Calculate the steering angle
+        alpha = atan2(lookahead_point[1] - (self.y0- 0.232 * sin(self.theta0)), lookahead_point[0] - ((self.x0 - 0.232 * cos(self.theta0) ))) - self.theta0
+        steering_angle = atan2(2 * self.car_wheel_base * sin(alpha), ld)
+        omega = steering_angle / self.dt
+        omega = np.clip(omega, -2.5235, 2.5235)  # Limit angular velocity
+
+        # Publish control command
+        control_cmd = Twist()
+        control_cmd.linear.x = self.velocity
+        control_cmd.angular.z = omega
+        self.pub.publish(control_cmd)
+
+        rospy.loginfo(f"Velocity: {self.velocity}, Steering Angle: {steering_angle}, Lookahead Point: {lookahead_point}")
+
         # 종료 조건: odom의 x 값이 path의 x 값에 도달한 경우
-        # 작은 오차를 허용
         if abs(self.x0 - path_x_data[-1]) < 0.5 and abs(self.y0 - path_y_data[-1]) < 0.5:
-            rospy.loginfo("Reached the target x position. Shutting down the node.")
+            rospy.loginfo("Reached the target position. Shutting down the node.")
             save_results_and_shutdown()
 
+    def publish_lookahead_marker(self, lookahead_point):
+        marker = Marker()
+        marker.header.frame_id = "odom"  # Set the frame ID to your coordinate frame
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "lookahead_point"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x = lookahead_point[0]
+        marker.pose.position.y = lookahead_point[1]
+        marker.pose.position.z = 0  # Assuming 2D navigation
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.2  # Size of the sphere
+        marker.scale.y = 0.2
+        marker.scale.z = 0.2
+        marker.color.a = 1.0  # Opacity
+        marker.color.r = 1.0  # Red
+        marker.color.g = 0.0  # Green
+        marker.color.b = 0.0  # Blue
+        self.marker_pub.publish(marker)
 
     def get_yaw_from_quaternion(self, q):
-        """
-        Convert a quaternion into yaw angle (in radians)
-        """
         euler = euler_from_quaternion([q.x, q.y, q.z, q.w])
         return euler[2]
 
 def save_graph():
     # 디렉터리가 없으면 생성
-    save_dir = os.path.expanduser(f'~/scout_sim/odom/v{stanley_vel}_tuning')
+    save_dir = os.path.expanduser(f'~/scout_sim/odom/pure_v{pure_pursuit_vel}_tuning')
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     # 고유 파일 이름 생성
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f'graph_v{stanley_vel}_{stanley_k}.png'
+    filename = f'pure_v{pure_pursuit_vel}_k{pure_pursuit_ld_gain}.png'
     filepath = os.path.join(save_dir, filename)
 
     fig, axs = plt.subplots(3, 1, figsize=(10, 15))  # 3개의 서브플롯을 세로로 배치
@@ -203,7 +224,7 @@ def save_rmse_table(cross_track_rmse, heading_rmse):
     df = pd.DataFrame(data)
 
     # 디렉터리가 없으면 생성
-    save_dir = os.path.expanduser(f'~/scout_sim/table/v{stanley_vel}_tuning')
+    save_dir = os.path.expanduser(f'~/scout_sim/table/pure_v{pure_pursuit_vel}_tuning')
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
@@ -211,7 +232,7 @@ def save_rmse_table(cross_track_rmse, heading_rmse):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M')
 
     # 이미지 파일 이름 생성
-    img_filename = f'rmse_v{stanley_vel}_{stanley_k}.png'
+    img_filename = f'pure_v{pure_pursuit_vel}_{pure_pursuit_ld_gain}.png'
     img_filepath = os.path.join(save_dir, img_filename)
 
     # 표를 이미지로 저장
@@ -225,15 +246,15 @@ def save_rmse_table(cross_track_rmse, heading_rmse):
     print(f"RMSE table saved as {img_filepath}")
 
 def save_data_to_txt():
-    save_dir = os.path.expanduser(f'~/scout_sim/odom/stanley_v{stanley_vel}_tuning')
+    save_dir = os.path.expanduser(f'~/scout_sim/odom/pure_v{pure_pursuit_vel}_tuning')
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
     # x, y 데이터 저장
-    np.savetxt(os.path.join(save_dir, 'stanley_xy_data.txt'), np.column_stack((x_data, y_data)), header="x y", comments='')
+    np.savetxt(os.path.join(save_dir, 'purepursuit_xy_data.txt'), np.column_stack((x_data, y_data)), header="x y", comments='')
 
     # heading error, cross track error 데이터 저장
-    np.savetxt(os.path.join(save_dir, 'stanley_errors.txt'), np.column_stack((odom_x_for_heading_error, heading_error_data, cross_track_error_data)), header="x heading_error cross_track_error", comments='')
+    np.savetxt(os.path.join(save_dir, 'purepursuit_errors.txt'), np.column_stack((odom_x_for_heading_error, heading_error_data, cross_track_error_data)), header="x heading_error cross_track_error", comments='')
 
     print(f"Data saved as text files in {save_dir}")
 
@@ -253,7 +274,7 @@ def save_results_and_shutdown():
     # RMSE print
     print()
     print()
-    print(f'v{stanley_vel},k{stanley_k} | cross_track: {cross_track_rmse}, heading: {heading_rmse}')
+    print(f'v{pure_pursuit_vel}, ld_gain{pure_pursuit_ld_gain} | cross_track: {cross_track_rmse}, heading: {heading_rmse}')
     print()
     print()
     # ROS 노드 종료
@@ -263,15 +284,13 @@ def signal_handler(sig, frame):
 
 if __name__ == "__main__":
     hz = 50
-    rospy.init_node("Stanleycontroller")
-    node = Stanleycontroller(hz)
+    rospy.init_node("PurePursuitController")
+    node = PurePursuitController(hz)
 
-    # SIGINT (Ctrl+C) 시그널 핸들러 설정
     signal.signal(signal.SIGINT, signal_handler)
 
     rate = rospy.Rate(hz)   # 50 Hz
     while not rospy.is_shutdown():
         rate.sleep()
 
-    # 종료 시 결과 저장
     save_results_and_shutdown()

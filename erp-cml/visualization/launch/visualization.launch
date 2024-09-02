@@ -1,7 +1,6 @@
 <launch>
     <!-- Run the broadcaster.py node -->
     <node name="broadcaster" pkg="visualization" type="broadcaster.py" output="screen"/>
-
     <!-- Run RViz with a specific configuration file -->
     <node name="rviz" pkg="rviz" type="rviz" args="-d $(find visualization)/rviz/erp.rviz" />
 </launch>

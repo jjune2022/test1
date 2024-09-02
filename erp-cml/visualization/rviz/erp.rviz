@@ -7,7 +7,6 @@ Panels:
         - /Global Options1
         - /Status1
         - /MarkerArray1
-        - /MarkerArray1/Status1
         - /Marker1
         - /Marker1/Namespaces1
       Splitter Ratio: 0.5
@@ -60,10 +59,7 @@ Visualization Manager:
       Marker Topic: /visualization_values
       Name: MarkerArray
       Namespaces:
-        brake: true
-        encoder: true
-        speed: true
-        steer: true
+        {}
       Queue Size: 100
       Value: true
     - Class: rviz/Marker
@@ -71,8 +67,7 @@ Visualization Manager:
       Marker Topic: /visualization_marker
       Name: Marker
       Namespaces:
-        lines: true
-        vehicle: true
+        {}
       Queue Size: 100
       Value: true
     - Class: rviz/Image
@@ -115,7 +110,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 25.657943725585938
+      Distance: 20.697059631347656
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -153,5 +148,5 @@ Window Geometry:
   Views:
     collapsed: true
   Width: 1200
-  X: 829
-  Y: 44
+  X: 720
+  Y: 27
